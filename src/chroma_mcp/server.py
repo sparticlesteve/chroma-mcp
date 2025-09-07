@@ -1,21 +1,19 @@
 from typing import Dict, List, TypedDict, Union
-from enum import Enum
+from dataclasses import dataclass
 import chromadb
-from mcp.server.fastmcp import FastMCP
 import os
 from dotenv import load_dotenv
 import argparse
 from chromadb.config import Settings
 import ssl
-import uuid
-import time
 import json
 from typing_extensions import TypedDict
+from smolagents import tool, ToolCollection
 
 
 from chromadb.api.collection_configuration import (
-    CreateCollectionConfiguration
-    )
+    CreateCollectionConfiguration,
+)
 from chromadb.api import EmbeddingFunction
 from chromadb.utils.embedding_functions import (
     DefaultEmbeddingFunction,
@@ -26,8 +24,36 @@ from chromadb.utils.embedding_functions import (
     RoboflowEmbeddingFunction,
 )
 
-# Initialize FastMCP server
-mcp = FastMCP("chroma")
+
+@dataclass
+class TextContent:
+    text: str
+
+
+class ToolError(Exception):
+    """Wrapper exception matching the MCP interface."""
+
+
+class MCPWrapper:
+    def __init__(self, tools: List):
+        self.tools = {t.name: t for t in tools}
+
+    async def call_tool(self, name: str, arguments: Dict):
+        tool_obj = self.tools.get(name)
+        if tool_obj is None:
+            raise ToolError(f"Tool {name} not found")
+        try:
+            result = tool_obj(**arguments)
+        except Exception as e:
+            raise ToolError(str(e)) from e
+
+        if isinstance(result, list):
+            if all(isinstance(item, str) for item in result):
+                return [TextContent(item) for item in result]
+            return result
+        if isinstance(result, dict):
+            return [TextContent(json.dumps(result))]
+        return [TextContent(str(result))]
 
 # Global variables
 _chroma_client = None
@@ -142,8 +168,8 @@ def get_chroma_client(args=None):
 
 ##### Collection Tools #####
 
-@mcp.tool()
-async def chroma_list_collections(
+@tool
+def chroma_list_collections(
     limit: int | None = None,
     offset: int | None = None
 ) -> List[str]:
@@ -168,7 +194,7 @@ async def chroma_list_collections(
     except Exception as e:
         raise Exception(f"Failed to list collections: {str(e)}") from e
 
-mcp_known_embedding_functions: Dict[str, EmbeddingFunction] = {
+mcp_known_embedding_functions: Dict[str, type[EmbeddingFunction]] = {
     "default": DefaultEmbeddingFunction,
     "cohere": CohereEmbeddingFunction,
     "openai": OpenAIEmbeddingFunction,
@@ -176,8 +202,8 @@ mcp_known_embedding_functions: Dict[str, EmbeddingFunction] = {
     "voyageai": VoyageAIEmbeddingFunction,
     "roboflow": RoboflowEmbeddingFunction,
 }
-@mcp.tool()
-async def chroma_create_collection(
+@tool
+def chroma_create_collection(
     collection_name: str,
     embedding_function_name: str = "default",
     metadata: Dict | None = None,
@@ -193,7 +219,7 @@ async def chroma_create_collection(
     
     embedding_function = mcp_known_embedding_functions[embedding_function_name]
     
-    configuration=CreateCollectionConfiguration(
+    configuration = CreateCollectionConfiguration(
         embedding_function=embedding_function()
     )
     
@@ -208,8 +234,8 @@ async def chroma_create_collection(
     except Exception as e:
         raise Exception(f"Failed to create collection '{collection_name}': {str(e)}") from e
 
-@mcp.tool()
-async def chroma_peek_collection(
+@tool
+def chroma_peek_collection(
     collection_name: str,
     limit: int = 5
 ) -> Dict:
@@ -223,12 +249,15 @@ async def chroma_peek_collection(
     try:
         collection = client.get_collection(collection_name)
         results = collection.peek(limit=limit)
+        results = json.loads(
+            json.dumps(results, default=lambda x: x.tolist() if hasattr(x, "tolist") else x)
+        )
         return results
     except Exception as e:
         raise Exception(f"Failed to peek collection '{collection_name}': {str(e)}") from e
 
-@mcp.tool()
-async def chroma_get_collection_info(collection_name: str) -> Dict:
+@tool
+def chroma_get_collection_info(collection_name: str) -> Dict:
     """Get information about a Chroma collection.
     
     Args:
@@ -237,23 +266,26 @@ async def chroma_get_collection_info(collection_name: str) -> Dict:
     client = get_chroma_client()
     try:
         collection = client.get_collection(collection_name)
-        
+
         # Get collection count
         count = collection.count()
-        
+
         # Peek at a few documents
         peek_results = collection.peek(limit=3)
-        
+        peek_results = json.loads(
+            json.dumps(peek_results, default=lambda x: x.tolist() if hasattr(x, "tolist") else x)
+        )
+
         return {
             "name": collection_name,
             "count": count,
-            "sample_documents": peek_results
+            "sample_documents": peek_results,
         }
     except Exception as e:
         raise Exception(f"Failed to get collection info for '{collection_name}': {str(e)}") from e
     
-@mcp.tool()
-async def chroma_get_collection_count(collection_name: str) -> int:
+@tool
+def chroma_get_collection_count(collection_name: str) -> int:
     """Get the number of documents in a Chroma collection.
     
     Args:
@@ -266,8 +298,8 @@ async def chroma_get_collection_count(collection_name: str) -> int:
     except Exception as e:
         raise Exception(f"Failed to get collection count for '{collection_name}': {str(e)}") from e
 
-@mcp.tool()
-async def chroma_modify_collection(
+@tool
+def chroma_modify_collection(
     collection_name: str,
     new_name: str | None = None,
     new_metadata: Dict | None = None,
@@ -294,8 +326,8 @@ async def chroma_modify_collection(
     except Exception as e:
         raise Exception(f"Failed to modify collection '{collection_name}': {str(e)}") from e
     
-@mcp.tool()
-async def chroma_fork_collection(
+@tool
+def chroma_fork_collection(
     collection_name: str,
     new_collection_name: str,
 ) -> str:
@@ -314,8 +346,8 @@ async def chroma_fork_collection(
     except Exception as e:
         raise Exception(f"Failed to fork collection '{collection_name}': {str(e)}") from e
     
-@mcp.tool()
-async def chroma_delete_collection(collection_name: str) -> str:
+@tool
+def chroma_delete_collection(collection_name: str) -> str:
     """Delete a Chroma collection.
     
     Args:
@@ -329,8 +361,8 @@ async def chroma_delete_collection(collection_name: str) -> str:
         raise Exception(f"Failed to delete collection '{collection_name}': {str(e)}") from e
 
 ##### Document Tools #####
-@mcp.tool()
-async def chroma_add_documents(
+@tool
+def chroma_add_documents(
     collection_name: str,
     documents: List[str],
     ids: List[str],
@@ -374,7 +406,7 @@ async def chroma_add_documents(
         result = collection.add(
             documents=documents,
             metadatas=metadatas,
-            ids=ids
+            ids=ids,
         )
         
         # Check the return value
@@ -392,8 +424,8 @@ async def chroma_add_documents(
     except Exception as e:
         raise Exception(f"Failed to add documents to collection '{collection_name}': {str(e)}") from e
 
-@mcp.tool()
-async def chroma_query_documents(
+@tool
+def chroma_query_documents(
     collection_name: str,
     query_texts: List[str],
     n_results: int = 5,
@@ -434,13 +466,13 @@ async def chroma_query_documents(
             n_results=n_results,
             where=where,
             where_document=where_document,
-            include=include
+            include=include,
         )
     except Exception as e:
         raise Exception(f"Failed to query documents from collection '{collection_name}': {str(e)}") from e
 
-@mcp.tool()
-async def chroma_get_documents(
+@tool
+def chroma_get_documents(
     collection_name: str,
     ids: List[str] | None = None,
     where: Dict | None = None,
@@ -489,8 +521,8 @@ async def chroma_get_documents(
     except Exception as e:
         raise Exception(f"Failed to get documents from collection '{collection_name}': {str(e)}") from e
 
-@mcp.tool()
-async def chroma_update_documents(
+@tool
+def chroma_update_documents(
     collection_name: str,
     ids: List[str],
     embeddings: List[List[float]] | None = None,
@@ -564,8 +596,8 @@ async def chroma_update_documents(
             f"Failed to update documents in collection '{collection_name}': {str(e)}"
         ) from e
 
-@mcp.tool()
-async def chroma_delete_documents(
+@tool
+def chroma_delete_documents(
     collection_name: str,
     ids: List[str]
 ) -> str:
@@ -604,6 +636,25 @@ async def chroma_delete_documents(
             f"Failed to delete documents from collection '{collection_name}': {str(e)}"
         ) from e
 
+tools = ToolCollection([
+    chroma_list_collections,
+    chroma_create_collection,
+    chroma_peek_collection,
+    chroma_get_collection_info,
+    chroma_get_collection_count,
+    chroma_modify_collection,
+    chroma_fork_collection,
+    chroma_delete_collection,
+    chroma_add_documents,
+    chroma_query_documents,
+    chroma_get_documents,
+    chroma_update_documents,
+    chroma_delete_documents,
+])
+
+mcp = MCPWrapper(tools.tools)
+
+
 def validate_thought_data(input_data: Dict) -> Dict:
     """Validate thought data structure."""
     if not input_data.get("sessionId"):
@@ -631,21 +682,19 @@ def validate_thought_data(input_data: Dict) -> Dict:
     }
 
 def main():
-    """Entry point for the Chroma MCP server."""
+    """Entry point for initializing Chroma client for smolagents tools."""
     parser = create_parser()
     args = parser.parse_args()
-    
+
     if args.dotenv_path:
         load_dotenv(dotenv_path=args.dotenv_path)
-        # re-parse args to read the updated environment variables
         parser = create_parser()
         args = parser.parse_args()
-    
-    # Validate required arguments based on client type
+
     if args.client_type == 'http':
         if not args.host:
             parser.error("Host must be provided via --host flag or CHROMA_HOST environment variable when using HTTP client")
-    
+
     elif args.client_type == 'cloud':
         if not args.tenant:
             parser.error("Tenant must be provided via --tenant flag or CHROMA_TENANT environment variable when using cloud client")
@@ -653,18 +702,15 @@ def main():
             parser.error("Database must be provided via --database flag or CHROMA_DATABASE environment variable when using cloud client")
         if not args.api_key:
             parser.error("API key must be provided via --api-key flag or CHROMA_API_KEY environment variable when using cloud client")
-    
-    # Initialize client with parsed args
+
     try:
         get_chroma_client(args)
         print("Successfully initialized Chroma client")
     except Exception as e:
         print(f"Failed to initialize Chroma client: {str(e)}")
         raise
-    
-    # Initialize and run the server
-    print("Starting MCP server")
-    mcp.run(transport='stdio')
+
+    print("Chroma smolagents tools are ready")
     
 if __name__ == "__main__":
     main()

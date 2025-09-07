@@ -5,7 +5,7 @@ import sys
 import os
 from unittest.mock import patch, MagicMock
 import argparse
-from mcp.server.fastmcp.exceptions import ToolError # Import ToolError
+from chroma_mcp.server import ToolError
 import json # Import json for parsing results
 
 
